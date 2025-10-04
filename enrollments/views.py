@@ -8,7 +8,13 @@ from django.template.loader import get_template
 from rest_framework import viewsets, filters, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from drf_spectacular.utils import extend_schema
+
+from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
+from .auth_serializers import LoginSerializer
 
 from xhtml2pdf import pisa
 
@@ -137,6 +143,20 @@ class CourseViewSet(viewsets.ModelViewSet):
             f"curso_{course.code}_alumnos.pdf",
         )
     
+    @action(detail=False, methods=["get"], url_path="report-pdf-all", permission_classes=[AllowAny])
+    def report_pdf_all(self, request):
+        courses = Course.objects.all().order_by("code")  # pylint: disable=no-member
+        ctx = {
+            "courses": courses,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        return _render_pdf_from_template(
+            request,
+            "enrollments/report_courses_all.html",
+            ctx,
+            "cursos_disponibles.pdf",
+        )
+    
 @extend_schema(tags=["Enrollments"])
 class EnrollmentViewSet(viewsets.ModelViewSet):
     queryset= Enrollment.objects.select_related("student", "course").all() # pylint: disable=no-member
@@ -195,7 +215,8 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
 
             #Se usa el guion bajo porque el metodo devuelve si o si dos cosas
             #el objeto y un booleano pero como no me importa el bool
-            #la convencion dice 
+            #la convencion dice que se tiene que poner _
+            #ya que no me interesa el otro valor
             group, _ = Group.objects.get_or_create(name="alumno")
             user.groups.add(group) # pylint: disable=no-member
 
@@ -206,7 +227,6 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         else:
             username = student.user.username
         
-        #averiguar porque le llamo asi mañana
         payload= {
             "enrollment": EnrollmentSerializer(enrollment).data,
             "credentials":{
@@ -224,13 +244,33 @@ def _render_pdf_from_template(request, template_name: str, context: dict, filena
     template = get_template(template_name)
     html = template.render(context)
 
+    dl_flag = (request.GET.get("download") or "").lower() in ("1", "true", "yes")
+    disposition = "attachment" if dl_flag else "inline"
+
     response = HttpResponse(content_type="application/pdf")
-    # 'inline' para ver en el navegador; usa 'attachment' si querés forzar descarga
-    response["Content-Disposition"] = f'inline; filename="{filename}"'
+    response["Content-Disposition"] = f'{disposition}; filename="{filename}"'
 
     result = pisa.CreatePDF(src=html, dest=response, encoding="utf-8")
     if result.err:
         return HttpResponse("Error al generar PDF", status=500)
     return response
 
+class LoginView(TokenObtainPairView):
+    serializer_class = LoginSerializer
 
+class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        groups = list(user.groups.values_list("name", flat=True))
+        student = Student.objects.filter(user=user).first() # pylint: disable=no-member
+        return Response({
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "groups": groups,
+            "student_id": student.id if student else None,
+        })
