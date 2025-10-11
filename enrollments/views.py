@@ -1,6 +1,6 @@
 from datetime import datetime
 import unicodedata, re
-
+from django.db.models import Count
 from django.contrib.auth.models import User, Group
 from django.http import HttpResponse, Http404
 from django.template.loader import get_template
@@ -90,12 +90,20 @@ class StudentViewSet(viewsets.ModelViewSet):
             "enrolls": enrolls,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
-        return _render_pdf_from_template(
+        return _pdf_render(
             request,
             "enrollments/report_student.html",
             ctx,
             f"alumno_{student.last_name}_{student.first_name}_cursos.pdf",
         )
+    @action(detail=False, methods=["get"], url_path="report-all")
+    def report_all_students(self, request):
+        students = Student.objects.order_by("last_name", "first_name") # pylint: disable=no-member
+        ctx = {
+            "students": students,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        return _pdf_render(request, "enrollments/report_student_all.html", ctx, "all_students.pdf")
 
 
 @extend_schema(tags=["Courses"])    
@@ -136,7 +144,7 @@ class CourseViewSet(viewsets.ModelViewSet):
             "enrolls": enrolls,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
-        return _render_pdf_from_template(
+        return _pdf_render(
             request,
             "enrollments/report_course.html",
             ctx,
@@ -150,7 +158,7 @@ class CourseViewSet(viewsets.ModelViewSet):
             "courses": courses,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
-        return _render_pdf_from_template(
+        return _pdf_render(
             request,
             "enrollments/report_courses_all.html",
             ctx,
@@ -189,66 +197,99 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         #aca usa el metodo ya generado por el viewSet de create
         #para crear una matriculaciones silvestre y comun
         enrollment = Enrollment.objects.create(student = student, course = course) # pylint: disable=no-member
-        #pero yo no quiero solo eso
-        #habilitamos variables que nos seran utiles
-        created_user = False
-        temp_password = None
-        #segun mi logica, si es la primera vez que el alumno se matricula,
-        #se creara tambien su usuario y contraseña
-        
-        if not student.user:
-            base = _base_username(student.first_name, student.last_name)
-            username = _unique_username(base)
-            #crea el objeto user para crearle un usuario al alumno
-            user = User(
-                username = username,
-                first_name = (student.first_name or "").split()[0],
-                last_name=(student.last_name or "").split()[0],
-                email = student.email
-            )
-            #asigna temporalmente la cedula como contraseña
-            temp_password = student.id_number
-            #aca automaticamente al guardar la contraseña tambien la hashea
-            user.set_password(temp_password)
-            #guarda los cambios
-            user.save()
+            
+        return Response(EnrollmentSerializer(enrollment).data, status=status.HTTP_201_CREATED)
+    #detail = False, significa que no trabaja buscando un id del objeto principal en este caso Enrollment, busca por un grupo filtrado
+    #la r en el url path significa que no lee el backslash como caracter especial
+    #(?P<course_id>\d+) esta es una expresion regular, regex, que le dice que capturara el numero que venga en esa posicion en la URL
+    #los parentesis crean un grupo de captura, y el ?P nombra al grupo, y el \+d dice que sean numeros
+    @action(detail=False, methods=["get"], url_path=r"by-course/(?P<course_id>\d+)")
+    def by_course(self, request, course_id=None):
+        qs = (
+            Enrollment.objects # pylint: disable=no-member
+            .filter(course_id=course_id)
+            .select_related("student", "course")
+            .order_by("student__last_name", "student__first_name")
+        )
+        return Response(EnrollmentSerializer(qs, many=True).data)
+    @action(detail=False, methods=["get"], url_path=r"by-student/(?P<student_id>\d+)")
+    def by_student(self, request, student_id=None):
+        qs = (
+            Enrollment.objects # pylint: disable=no-member
+            .filter(stundent_id=student_id)
+            .select_related("student", "course")
+            .order_by("course__code")
+        )
+        return Response(EnrollmentSerializer(qs, many=True).data)
+     # --- Reporte de matriculaciones por alumno ---
+    @action(detail=False, methods=["get"], url_path=r"report-student/(?P<student_id>\d+)")
+    def report_student(self, request, student_id=None):
+        enrolls = (
+            Enrollment.objects  # pylint: disable=no-member
+            .filter(student_id=student_id)
+            .select_related("student", "course")
+            .order_by("course__code")
+        )
+        if not enrolls.exists():
+            return Response({"detail": "El alumno no tiene matriculaciones"}, status=404)
 
-            #Se usa el guion bajo porque el metodo devuelve si o si dos cosas
-            #el objeto y un booleano pero como no me importa el bool
-            #la convencion dice que se tiene que poner _
-            #ya que no me interesa el otro valor
-            group, _ = Group.objects.get_or_create(name="alumno")
-            user.groups.add(group) # pylint: disable=no-member
-
-            student.user = user
-            student.save(update_fields=["user"])
-            created_user = True
-
-        else:
-            username = student.user.username
-        
-        payload= {
-            "enrollment": EnrollmentSerializer(enrollment).data,
-            "credentials":{
-                "username": username,
-                "email": student.email,
-                "created_user": created_user
-            }
+        student = enrolls.first().student
+        ctx = {
+            "student": student,
+            "enrolls": enrolls,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
+        return _pdf_render(request, "enrollments/report_student_enrollments.html", ctx,
+                           f"matriculas_{student.last_name}_{student.first_name}.pdf")
 
-        if created_user and temp_password:
-            payload["credentials"]["temp_password"] = temp_password
-        
-        return Response(payload, status=status.HTTP_201_CREATED)
-def _render_pdf_from_template(request, template_name: str, context: dict, filename: str)-> HttpResponse:
+    # --- Reporte de matriculaciones por curso ---
+    @action(detail=False, methods=["get"], url_path=r"report-course/(?P<course_id>\d+)")
+    def report_course(self, request, course_id=None):
+        enrolls = (
+            Enrollment.objects # pylint: disable=no-member
+            .filter(course_id=course_id)
+            .select_related("student", "course")
+            .order_by("student__last_name", "student__first_name")
+        )
+        if not enrolls.exists():
+            return Response({"detail": "El curso no tiene alumnos matriculados"}, status=404)
+
+        course = enrolls.first().course
+        ctx = {
+            "course": course,
+            "enrolls": enrolls,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        return _pdf_render(request, "enrollments/report_course_enrollments.html", ctx,
+                           f"alumnos_{course.code}.pdf")
+
+    # --- Reporte general de matriculaciones ---
+    @action(detail=False, methods=["get"], url_path="report-all-enrollments")
+    def report_all_enrollments(self, request):
+        ranking = (
+            Course.objects  # pylint: disable=no-member
+            .annotate(total=Count("enrollment"))
+            .order_by("-total", "code")
+            .prefetch_related("enrollment_set__student")
+        )
+        ctx = {
+            "courses": ranking,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        return _pdf_render(request, "enrollments/report_enrollments_all.html", ctx,
+                           "matriculaciones_por_curso.pdf")
+    
+def _pdf_render(request, template_name: str, context: dict, filename: str)-> HttpResponse:
     template = get_template(template_name)
     html = template.render(context)
 
-    dl_flag = (request.GET.get("download") or "").lower() in ("1", "true", "yes")
-    disposition = "attachment" if dl_flag else "inline"
-
+    download_flag = (request.GET.get("download", "1") or "1").lower()
+    disposition = "inline" if download_flag in ("0", "false", "no") else "attachment"
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    final_filename = f"{filename.rstrip('.pdf')}_{timestamp}.pdf"
     response = HttpResponse(content_type="application/pdf")
-    response["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+    response["Content-Disposition"] = f'{disposition}; filename="{final_filename}"'
 
     result = pisa.CreatePDF(src=html, dest=response, encoding="utf-8")
     if result.err:
