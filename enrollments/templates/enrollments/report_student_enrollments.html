@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Matriculaciones por alumno</title>
+<style>
+  body{font-family: DejaVu Sans, Arial, sans-serif; font-size:12px}
+  h1,h2{margin:0 0 6px 0}
+  .muted{color:#666; font-size:11px; margin-bottom:8px}
+  table{width:100%; border-collapse:collapse; margin-top:10px}
+  th,td{border:1px solid #999; padding:6px; text-align:left}
+  th{background:#f0f0f0}
+</style>
+</head>
+<body>
+  <h1>Matriculaciones del alumno</h1>
+  <h2>{{ student.last_name }}, {{ student.first_name }}</h2>
+  <div class="muted">Generado: {{ generated_at }}</div>
+
+  <table>
+    <tr>
+      <th>#</th><th>Código</th><th>Curso</th><th>Fecha</th>
+    </tr>
+    {% for e in enrolls %}
+    <tr>
+      <td>{{ forloop.counter }}</td>
+      <td>{{ e.course.code }}</td>
+      <td>{{ e.course.title }}</td>
+      <td>{{ e.enrolled_at|date:"d/m/Y H:i" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</body>
+</html>
